@@ -1,0 +1,100 @@
+name: Deploy (dev)
+
+# Manual only, and it waits for your approval: the job runs in the "dev"
+# GitHub environment, which is set to require a reviewer. This and Destroy are
+# the only workflows that touch AWS resources that cost money.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-dev
+  cancel-in-progress: false
+
+env:
+  TF_VERSION: "1.17.1"
+  TF_IN_AUTOMATION: "true"
+  AWS_REGION: us-east-1
+  IMAGE_TAG: ${{ github.sha }}
+  # Repository variables, passed through env rather than pasted into scripts.
+  STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+  ALERT_EMAIL: ${{ vars.ALERT_EMAIL }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: dev
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: infra/envs/dev
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Init
+        run: terraform init -input=false -backend-config="bucket=$STATE_BUCKET" -backend-config="region=$AWS_REGION"
+
+      # The registry has to exist before an image can be pushed to it.
+      - name: Ensure registry exists
+        run: terraform apply -input=false -auto-approve -target=module.ecr -var "image_tag=$IMAGE_TAG"
+
+      - name: ECR login
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build and push image (tag = commit SHA)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: app
+          push: true
+          provenance: false
+          tags: ${{ steps.ecr.outputs.registry }}/shortlink:${{ env.IMAGE_TAG }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Block on critical vulnerabilities
+        run: |
+          aws ecr wait image-scan-complete --repository-name shortlink --image-id imageTag=$IMAGE_TAG
+          counts=$(aws ecr describe-image-scan-findings --repository-name shortlink --image-id imageTag=$IMAGE_TAG \
+            --query 'imageScanFindings.findingSeverityCounts' --output json)
+          echo "Scan findings: $counts" | tee -a "$GITHUB_STEP_SUMMARY"
+          critical=$(echo "$counts" | jq -r '.CRITICAL // 0')
+          if [ "$critical" -gt 0 ]; then echo "::error::$critical critical vulnerabilities in the image"; exit 1; fi
+
+      - name: Plan
+        run: terraform plan -input=false -var "image_tag=$IMAGE_TAG" -var "alert_email=$ALERT_EMAIL" -out=tfplan
+
+      - name: Apply
+        run: terraform apply -input=false tfplan
+
+      - name: Wait for the service to be stable
+        run: |
+          aws ecs wait services-stable --cluster "$(terraform output -raw ecs_cluster)" --services "$(terraform output -raw ecs_service)"
+
+      - name: Smoke test through the load balancer
+        run: |
+          url=$(terraform output -raw app_url)
+          for i in $(seq 1 30); do curl -fsS "$url/ready" && break; sleep 10; done
+          code=$(curl -fsS -X POST "$url/links" -H 'content-type: application/json' -d '{"url":"https://example.com"}' | jq -r .code)
+          test "$(curl -s -o /dev/null -w '%{http_code}' "$url/$code")" = "302"
+          {
+            echo "### Deployed \`$IMAGE_TAG\`"
+            echo "- App: $url"
+            echo "- Dashboard: $(terraform output -raw dashboard_url)"
+          } >> "$GITHUB_STEP_SUMMARY"
