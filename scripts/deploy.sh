@@ -4,7 +4,8 @@
 #   ./scripts/deploy.sh
 set -euo pipefail
 
-cd "$(dirname "$0")/../infra/envs/dev"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR/../infra/envs/dev"
 REGION="${AWS_REGION:-us-east-1}"
 TAG="$(git rev-parse --short=12 HEAD)"
 
@@ -24,15 +25,9 @@ if aws ecr describe-images --repository-name shortlink --image-ids imageTag="$TA
 else
   docker build --platform linux/amd64 -t "$REPO:$TAG" ../../../app
   docker push "$REPO:$TAG"
-  aws ecr wait image-scan-complete --repository-name shortlink --image-id imageTag="$TAG"
 fi
 
-critical="$(aws ecr describe-image-scan-findings --repository-name shortlink --image-id imageTag="$TAG" \
-  --query 'imageScanFindings.findingSeverityCounts.CRITICAL' --output text)"
-if [ "$critical" != "None" ] && [ "$critical" -gt 0 ]; then
-  echo "Blocked: $critical critical vulnerabilities in $TAG." >&2
-  exit 1
-fi
+"$SCRIPT_DIR/scan-gate.sh" shortlink "$TAG"
 
 terraform plan -input=false -var "image_tag=$TAG" -out=tfplan
 read -r -p "Apply this plan? [y/N] " ok

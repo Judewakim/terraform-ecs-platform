@@ -72,13 +72,39 @@ CREATE TABLE IF NOT EXISTS links (
 
 
 class PostgresStore:
-    """Postgres-backed store. Uses a small connection pool per task."""
+    """Postgres-backed store. Uses a small connection pool per task.
 
-    def __init__(self, conninfo: str, min_size: int = 1, max_size: int = 5) -> None:
+    `credentials` supplies the username and password for every new connection,
+    so a rotated password is picked up without restarting the task.
+    """
+
+    def __init__(self, conninfo: str, credentials, min_size: int = 1, max_size: int = 5) -> None:
         # Imported here so tests don't need the driver installed.
+        import psycopg
         from psycopg_pool import ConnectionPool
 
-        self._pool = ConnectionPool(conninfo, min_size=min_size, max_size=max_size, open=True)
+        class RotatingConnection(psycopg.Connection):
+            @classmethod
+            def connect(cls, conninfo: str = "", **kwargs):
+                creds = credentials.get()
+                try:
+                    return super().connect(conninfo, user=creds.username, password=creds.password, **kwargs)
+                except psycopg.OperationalError as exc:
+                    if "password authentication failed" not in str(exc):
+                        raise
+                    # Password rotated since we cached it: refetch once and retry.
+                    credentials.invalidate()
+                    creds = credentials.get()
+                    return super().connect(conninfo, user=creds.username, password=creds.password, **kwargs)
+
+        self._pool = ConnectionPool(
+            conninfo,
+            connection_class=RotatingConnection,
+            min_size=min_size,
+            max_size=max_size,
+            max_lifetime=900,  # recycle connections every 15 minutes
+            open=True,
+        )
         with self._pool.connection() as conn:
             conn.execute(SCHEMA)
 

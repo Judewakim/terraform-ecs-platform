@@ -4,8 +4,19 @@ locals {
   image = "${var.repository_url}:${var.image_tag}"
 }
 
+# Container Insights would create this itself, unencrypted, and it would
+# outlive terraform destroy.
+resource "aws_cloudwatch_log_group" "container_insights" {
+  #checkov:skip=CKV_AWS_338:Retention is a variable; 30 days in dev to control cost
+  name              = "/aws/ecs/containerinsights/${var.name}/performance"
+  retention_in_days = var.log_retention_days
+  kms_key_id        = var.logs_kms_key_arn
+}
+
 resource "aws_ecs_cluster" "this" {
   name = var.name
+
+  depends_on = [aws_cloudwatch_log_group.container_insights]
 
   setting {
     name  = "containerInsights"
@@ -51,11 +62,12 @@ data "aws_iam_policy_document" "ecs_assume" {
   }
 }
 
-# Execution role: what ECS itself uses to start the task (pull image, write
-# logs, fetch the DB secret). The app code never gets these permissions.
+# Execution role: what ECS itself uses to start the task (pull the image,
+# write logs). The app code never gets these permissions.
 resource "aws_iam_role" "execution" {
-  name               = "${var.name}-execution"
-  assume_role_policy = data.aws_iam_policy_document.ecs_assume.json
+  name                 = "${var.name}-execution"
+  assume_role_policy   = data.aws_iam_policy_document.ecs_assume.json
+  permissions_boundary = var.permissions_boundary_arn
 }
 
 data "aws_iam_policy_document" "execution" {
@@ -80,18 +92,6 @@ data "aws_iam_policy_document" "execution" {
     actions   = ["logs:CreateLogStream", "logs:PutLogEvents"]
     resources = ["${aws_cloudwatch_log_group.app.arn}:*"]
   }
-
-  statement {
-    sid       = "DbSecret"
-    actions   = ["secretsmanager:GetSecretValue"]
-    resources = [var.db_secret_arn]
-  }
-
-  statement {
-    sid       = "DecryptSecret"
-    actions   = ["kms:Decrypt"]
-    resources = [var.kms_key_arn]
-  }
 }
 
 resource "aws_iam_role_policy" "execution" {
@@ -100,11 +100,38 @@ resource "aws_iam_role_policy" "execution" {
   policy = data.aws_iam_policy_document.execution.json
 }
 
-# Task role: what the running app can call. It needs no AWS APIs today, so it
-# gets no policy. Add statements here only when the app needs them.
+# Task role: what the running app can call, and nothing else. The app reads
+# the database password itself, each time it opens a connection, so the
+# weekly automatic rotation never leaves it holding a stale password.
 resource "aws_iam_role" "task" {
-  name               = "${var.name}-task"
-  assume_role_policy = data.aws_iam_policy_document.ecs_assume.json
+  name                 = "${var.name}-task"
+  assume_role_policy   = data.aws_iam_policy_document.ecs_assume.json
+  permissions_boundary = var.permissions_boundary_arn
+}
+
+data "aws_iam_policy_document" "task" {
+  statement {
+    sid       = "ReadDbSecret"
+    actions   = ["secretsmanager:GetSecretValue"]
+    resources = [var.db_secret_arn]
+  }
+
+  statement {
+    sid       = "DecryptDbSecret"
+    actions   = ["kms:Decrypt"]
+    resources = [var.kms_key_arn]
+    condition {
+      test     = "StringEquals"
+      variable = "kms:ViaService"
+      values   = ["secretsmanager.${data.aws_region.current.region}.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role_policy" "task" {
+  name   = "read-db-secret"
+  role   = aws_iam_role.task.id
+  policy = data.aws_iam_policy_document.task.json
 }
 
 # --- Task definition ---------------------------------------------------------
@@ -137,13 +164,10 @@ resource "aws_ecs_task_definition" "app" {
         { name = "DB_HOST", value = var.db_host },
         { name = "DB_PORT", value = tostring(var.db_port) },
         { name = "DB_NAME", value = var.db_name },
+        { name = "DB_SECRET_ARN", value = var.db_secret_arn },
+        { name = "AWS_REGION", value = data.aws_region.current.region },
         { name = "APP_VERSION", value = var.image_tag },
         { name = "LOG_LEVEL", value = "INFO" },
-      ]
-      # Pulled from Secrets Manager at task start. Never stored in the task definition.
-      secrets = [
-        { name = "DB_USER", valueFrom = "${var.db_secret_arn}:username::" },
-        { name = "DB_PASSWORD", valueFrom = "${var.db_secret_arn}:password::" },
       ]
       logConfiguration = {
         logDriver = "awslogs"

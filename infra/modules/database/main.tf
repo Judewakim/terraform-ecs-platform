@@ -30,6 +30,21 @@ resource "aws_db_parameter_group" "this" {
   }
 }
 
+# RDS would create these itself on first export, unencrypted and kept forever,
+# and they would outlive terraform destroy. Declaring them first fixes all three.
+resource "aws_cloudwatch_log_group" "rds" {
+  #checkov:skip=CKV_AWS_338:Retention is a variable; 30 days in dev to control cost
+  for_each = toset(local.log_exports)
+
+  name              = "/aws/rds/instance/${var.name}/${each.key}"
+  retention_in_days = var.log_retention_days
+  kms_key_id        = var.logs_kms_key_arn
+}
+
+locals {
+  log_exports = ["postgresql", "upgrade"]
+}
+
 resource "aws_db_instance" "this" {
   #checkov:skip=CKV_AWS_293:Deletion protection is a variable; true by default, false only in dev
   #checkov:skip=CKV_AWS_157:Multi-AZ is a variable; doubles cost, off in dev
@@ -69,11 +84,13 @@ resource "aws_db_instance" "this" {
   maintenance_window      = "sun:08:30-sun:09:30"
   copy_tags_to_snapshot   = true
 
-  enabled_cloudwatch_logs_exports = ["postgresql", "upgrade"]
+  enabled_cloudwatch_logs_exports = local.log_exports
 
   deletion_protection       = var.deletion_protection
   skip_final_snapshot       = var.skip_final_snapshot
   final_snapshot_identifier = var.skip_final_snapshot ? null : "${var.name}-final"
 
   apply_immediately = var.apply_immediately
+
+  depends_on = [aws_cloudwatch_log_group.rds]
 }

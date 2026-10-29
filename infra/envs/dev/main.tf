@@ -1,5 +1,8 @@
 locals {
   name = "${var.project}-${var.environment}"
+
+  # Created by infra/bootstrap. The deploy role can only create roles that carry it.
+  permissions_boundary_arn = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:policy/${var.project}-workload-boundary"
 }
 
 data "aws_caller_identity" "current" {}
@@ -52,6 +55,11 @@ data "aws_iam_policy_document" "kms" {
       type        = "Service"
       identifiers = ["cloudwatch.amazonaws.com"]
     }
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceAccount"
+      values   = [data.aws_caller_identity.current.account_id]
+    }
   }
 }
 
@@ -77,6 +85,8 @@ module "network" {
   az_count           = var.az_count
   single_nat_gateway = var.single_nat_gateway
   logs_kms_key_arn   = aws_kms_key.main.arn
+
+  permissions_boundary_arn = local.permissions_boundary_arn
 }
 
 module "ecr" {
@@ -104,6 +114,7 @@ module "database" {
   vpc_id              = module.network.vpc_id
   db_subnet_ids       = module.network.db_subnet_ids
   kms_key_arn         = aws_kms_key.main.arn
+  logs_kms_key_arn    = aws_kms_key.main.arn
   multi_az            = var.db_multi_az
   deletion_protection = var.environment != "dev"
   skip_final_snapshot = var.environment == "dev"
@@ -134,6 +145,8 @@ module "app" {
   kms_key_arn      = aws_kms_key.main.arn
   logs_kms_key_arn = aws_kms_key.main.arn
   listener_arn     = module.alb.listener_arn
+
+  permissions_boundary_arn = local.permissions_boundary_arn
 }
 
 module "observability" {

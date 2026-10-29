@@ -16,3 +16,7 @@ output "deploy_role_arn" {
   description = "GitHub secret AWS_DEPLOY_ROLE_ARN (store it on the dev environment)"
   value       = aws_iam_role.deploy.arn
 }
+
+output "workload_boundary_arn" {
+  value = aws_iam_policy.workload_boundary.arn
+}

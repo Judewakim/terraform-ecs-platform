@@ -40,18 +40,24 @@ the whole traffic path on one screen for review.
 ## 5. The database password never exists outside AWS
 
 `manage_master_user_password = true`: RDS generates the password, stores it in
-Secrets Manager encrypted with this stack's KMS key, and rotates it. ECS
-injects it into the container at start from the secret ARN. It never appears
-in Terraform state, CI logs, the task definition or this repo.
+Secrets Manager encrypted with this stack's KMS key, and rotates it every 7
+days. It never appears in Terraform state, CI logs, the task definition or
+this repo.
+
+The app reads the secret itself each time it opens a database connection
+(cached for 5 minutes, refetched immediately if a login fails). Injecting it
+as an environment variable at container start would break a week after every
+deploy: the password rotates, the pool opens a new connection, and login fails.
+A test against a real Postgres in CI rotates the password mid-run to prove it.
 **Prod upgrade:** a separate least-privilege app user via IAM database
 authentication (already enabled on the instance), instead of the master user.
 
 ## 6. Two IAM roles per task
 
-The execution role (used by ECS to start the task) can pull this image, write
-this log group and read this one secret. The task role (used by the app's own
-code) has no permissions. If the app is compromised, its credentials can't
-read the database secret or anything else in AWS.
+The execution role (used by ECS to start the task) can pull this image and
+write this log group. The task role (used by the app's own code) can read this
+one secret and decrypt it only through Secrets Manager. If the app is
+compromised, its credentials reach nothing else in AWS.
 
 ## 7. Readiness vs liveness
 
@@ -66,11 +72,16 @@ Everything that can run without AWS does: unit tests, image build and smoke
 test, `terraform validate`, module tests against a mocked provider, Checkov.
 Only plan, deploy and destroy assume AWS roles, through GitHub OIDC (short-lived
 tokens, no stored keys). The deploy role trusts only jobs in the `dev` GitHub
-environment, which requires a reviewer. The deploy role gets PowerUserAccess
-plus IAM limited to `shortlink-*` roles and an explicit deny on editing the CI
-roles themselves.
-**Prod upgrade:** replace PowerUserAccess with a service-scoped policy, and
-add a permissions boundary on roles the pipeline creates.
+environment, which requires a reviewer and only deploys from `main`.
+
+The deploy role gets PowerUserAccess plus IAM limited to `shortlink-*` roles.
+A role that can create roles can usually make itself admin: create a role with
+an admin policy, then assume it. Two guards close that: it can only create or
+edit roles that carry the `shortlink-workload-boundary` permissions boundary
+(a ceiling of logs, image pull, secret read and decrypt), and it is denied
+removing or swapping boundaries, attaching managed policies, and touching the
+CI roles. The plan role can read state and take the lock, but can't write state.
+**Prod upgrade:** replace PowerUserAccess with a service-scoped policy.
 
 ## 9. Checkov findings are skipped inline, with a reason
 

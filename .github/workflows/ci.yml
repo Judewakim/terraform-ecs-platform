@@ -19,8 +19,18 @@ env:
 
 jobs:
   app:
-    name: App tests
+    name: App tests (incl. real Postgres)
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: ci-only-password
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      PG_ADMIN_DSN: host=localhost port=5432 user=postgres password=ci-only-password dbname=postgres sslmode=disable
     defaults:
       run:
         working-directory: app
@@ -112,6 +122,7 @@ jobs:
     env:
       PLAN_ROLE: ${{ secrets.AWS_PLAN_ROLE_ARN }}
       STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+      ALERT_EMAIL: ${{ vars.ALERT_EMAIL }}
     steps:
       - name: Check setup
         id: setup
@@ -135,7 +146,7 @@ jobs:
         working-directory: infra/envs/dev
         run: |
           terraform init -input=false -backend-config="bucket=$STATE_BUCKET" -backend-config="region=us-east-1"
-          terraform plan -input=false -lock-timeout=5m -no-color -var "image_tag=${{ github.sha }}" -out=tfplan | tee plan.txt
+          terraform plan -input=false -lock-timeout=5m -no-color -var "image_tag=${{ github.sha }}" -var "alert_email=$ALERT_EMAIL" -out=tfplan | tee plan.txt
           {
             echo '### Terraform plan (dev)'
             echo '```'

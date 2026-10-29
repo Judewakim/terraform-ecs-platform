@@ -11,10 +11,11 @@ mock_provider "aws" {
 }
 
 variables {
-  name          = "test"
-  vpc_id        = "vpc-123"
-  db_subnet_ids = ["subnet-a", "subnet-b"]
-  kms_key_arn   = "arn:aws:kms:us-east-1:123456789012:key/mock"
+  name             = "test"
+  vpc_id           = "vpc-123"
+  db_subnet_ids    = ["subnet-a", "subnet-b"]
+  kms_key_arn      = "arn:aws:kms:us-east-1:123456789012:key/mock"
+  logs_kms_key_arn = "arn:aws:kms:us-east-1:123456789012:key/mock"
 }
 
 run "private_encrypted_managed_password" {

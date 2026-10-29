@@ -168,8 +168,9 @@ data "aws_iam_policy_document" "flow_logs_assume" {
 }
 
 resource "aws_iam_role" "flow_logs" {
-  name               = "${var.name}-flow-logs"
-  assume_role_policy = data.aws_iam_policy_document.flow_logs_assume.json
+  name                 = "${var.name}-flow-logs"
+  assume_role_policy   = data.aws_iam_policy_document.flow_logs_assume.json
+  permissions_boundary = var.permissions_boundary_arn
 }
 
 data "aws_iam_policy_document" "flow_logs" {
@@ -180,6 +181,11 @@ data "aws_iam_policy_document" "flow_logs" {
       "logs:DescribeLogStreams",
     ]
     resources = ["${aws_cloudwatch_log_group.flow_logs.arn}:*"]
+  }
+
+  statement {
+    actions   = ["logs:DescribeLogGroups"]
+    resources = ["*"]
   }
 }
 

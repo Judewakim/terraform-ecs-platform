@@ -48,18 +48,18 @@ def build_store() -> LinkStore:
 
     from psycopg.conninfo import make_conninfo
 
+    from .credentials import SecretsManagerCredentials
     from .store import PostgresStore
 
+    # No user or password here: each new connection reads them from Secrets Manager.
     conninfo = make_conninfo(
         host=os.environ["DB_HOST"],
         port=os.getenv("DB_PORT", "5432"),
         dbname=os.environ["DB_NAME"],
-        user=os.environ["DB_USER"],
-        password=os.environ["DB_PASSWORD"],
         sslmode=os.getenv("DB_SSLMODE", "require"),
         connect_timeout=5,
     )
-    return PostgresStore(conninfo)
+    return PostgresStore(conninfo, SecretsManagerCredentials(os.environ["DB_SECRET_ARN"]))
 
 
 def new_code() -> str:
@@ -77,7 +77,7 @@ def create_app(store: LinkStore | None = None) -> FastAPI:
         log.info("startup", extra={"fields": {"version": os.getenv("APP_VERSION", "dev")}})
         yield
 
-    app = FastAPI(title="Shortlink", lifespan=lifespan, docs_url="/docs", redoc_url=None)
+    app = FastAPI(title="Shortlink", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 
     @app.middleware("http")
     async def access_log(request: Request, call_next):

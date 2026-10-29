@@ -172,23 +172,29 @@ resource "aws_iam_role_policy_attachment" "plan_readonly" {
   policy_arn = "arn:aws:iam::aws:policy/ReadOnlyAccess"
 }
 
-data "aws_iam_policy_document" "state_access" {
+# Plan can read state and take the lock, but never write the state itself.
+data "aws_iam_policy_document" "plan_state" {
   statement {
     sid       = "ListState"
     actions   = ["s3:ListBucket"]
     resources = [aws_s3_bucket.state.arn]
   }
   statement {
-    sid       = "ReadWriteState"
-    actions   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
+    sid       = "ReadState"
+    actions   = ["s3:GetObject"]
     resources = ["${aws_s3_bucket.state.arn}/*"]
+  }
+  statement {
+    sid       = "LockOnly"
+    actions   = ["s3:PutObject", "s3:DeleteObject"]
+    resources = ["${aws_s3_bucket.state.arn}/*.tflock"]
   }
 }
 
 resource "aws_iam_role_policy" "plan_state" {
-  name   = "terraform-state"
+  name   = "terraform-state-read"
   role   = aws_iam_role.plan.id
-  policy = data.aws_iam_policy_document.state_access.json
+  policy = data.aws_iam_policy_document.plan_state.json
 }
 
 # Deploy role: can change infrastructure. Only jobs running in the GitHub
@@ -220,17 +226,62 @@ resource "aws_iam_role" "deploy" {
 }
 
 # PowerUserAccess covers everything except IAM. IAM is then granted only for
-# roles and policies whose names start with the project prefix.
+# roles whose names start with the project prefix, and only if they carry the
+# workload permissions boundary below. Without that condition the deploy role
+# could create an admin role and assume it.
 resource "aws_iam_role_policy_attachment" "deploy_poweruser" {
   role       = aws_iam_role.deploy.name
   policy_arn = "arn:aws:iam::aws:policy/PowerUserAccess"
 }
 
+# The most any role the pipeline creates can ever do, whatever policy it is
+# given: write logs, pull images, read a secret, decrypt with KMS.
+data "aws_iam_policy_document" "workload_boundary" {
+  #checkov:skip=CKV_AWS_111:A permissions boundary is a ceiling, not a grant; each role's own policy scopes resources
+  #checkov:skip=CKV_AWS_356:A permissions boundary is a ceiling, not a grant; each role's own policy scopes resources
+  #checkov:skip=CKV_AWS_108:A permissions boundary is a ceiling, not a grant; each role's own policy scopes resources
+  statement {
+    sid = "WorkloadCeiling"
+    actions = [
+      "logs:CreateLogStream",
+      "logs:PutLogEvents",
+      "logs:DescribeLogGroups",
+      "logs:DescribeLogStreams",
+      "ecr:GetAuthorizationToken",
+      "ecr:BatchCheckLayerAvailability",
+      "ecr:BatchGetImage",
+      "ecr:GetDownloadUrlForLayer",
+      "secretsmanager:GetSecretValue",
+      "kms:Decrypt",
+    ]
+    resources = ["*"]
+  }
+}
+
+resource "aws_iam_policy" "workload_boundary" {
+  name        = "${var.project}-workload-boundary"
+  description = "Permissions boundary for every role the ${var.project} pipeline creates"
+  policy      = data.aws_iam_policy_document.workload_boundary.json
+}
+
 data "aws_iam_policy_document" "deploy_iam" {
+  statement {
+    sid = "CreateOrChangeRolesOnlyWithBoundary"
+    actions = [
+      "iam:CreateRole",
+      "iam:PutRolePolicy",
+    ]
+    resources = ["arn:aws:iam::${local.account_id}:role/${var.project}-*"]
+    condition {
+      test     = "StringEquals"
+      variable = "iam:PermissionsBoundary"
+      values   = [aws_iam_policy.workload_boundary.arn]
+    }
+  }
+
   statement {
     sid = "ManageProjectRoles"
     actions = [
-      "iam:CreateRole",
       "iam:DeleteRole",
       "iam:GetRole",
       "iam:UpdateRole",
@@ -240,16 +291,34 @@ data "aws_iam_policy_document" "deploy_iam" {
       "iam:ListRolePolicies",
       "iam:ListAttachedRolePolicies",
       "iam:ListInstanceProfilesForRole",
-      "iam:PutRolePolicy",
       "iam:GetRolePolicy",
       "iam:DeleteRolePolicy",
-      "iam:AttachRolePolicy",
-      "iam:DetachRolePolicy",
     ]
     resources = ["arn:aws:iam::${local.account_id}:role/${var.project}-*"]
   }
 
-  # Never let the deploy role edit its own permissions or the plan role's.
+  statement {
+    sid       = "ReadBoundary"
+    actions   = ["iam:GetPolicy", "iam:GetPolicyVersion"]
+    resources = [aws_iam_policy.workload_boundary.arn]
+  }
+
+  # No removing or swapping the boundary, no managed-policy attachments, and
+  # no touching the CI roles or the boundary policy itself.
+  statement {
+    sid    = "NoEscalation"
+    effect = "Deny"
+    actions = [
+      "iam:DeleteRolePermissionsBoundary",
+      "iam:PutRolePermissionsBoundary",
+      "iam:AttachRolePolicy",
+      "iam:CreatePolicyVersion",
+      "iam:SetDefaultPolicyVersion",
+      "iam:DeletePolicy",
+    ]
+    resources = ["*"]
+  }
+
   statement {
     sid     = "ProtectCiRoles"
     effect  = "Deny"
@@ -261,17 +330,22 @@ data "aws_iam_policy_document" "deploy_iam" {
   }
 
   statement {
-    sid       = "PassProjectRoles"
+    sid       = "PassTaskRoles"
     actions   = ["iam:PassRole"]
     resources = ["arn:aws:iam::${local.account_id}:role/${var.project}-*"]
     condition {
       test     = "StringEquals"
       variable = "iam:PassedToService"
-      values = [
-        "ecs-tasks.amazonaws.com",
-        "vpc-flow-logs.amazonaws.com",
-      ]
+      values   = ["ecs-tasks.amazonaws.com"]
     }
+  }
+
+  # EC2 CreateFlowLogs may not set iam:PassedToService, so the flow-log role
+  # gets its own statement, limited by name instead.
+  statement {
+    sid       = "PassFlowLogRole"
+    actions   = ["iam:PassRole"]
+    resources = ["arn:aws:iam::${local.account_id}:role/${var.project}-*-flow-logs"]
   }
 
   statement {

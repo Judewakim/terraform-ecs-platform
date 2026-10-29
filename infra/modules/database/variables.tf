@@ -72,3 +72,13 @@ variable "apply_immediately" {
   type    = bool
   default = false
 }
+
+variable "logs_kms_key_arn" {
+  description = "KMS key for the RDS log groups."
+  type        = string
+}
+
+variable "log_retention_days" {
+  type    = number
+  default = 30
+}

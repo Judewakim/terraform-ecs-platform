@@ -41,3 +41,9 @@ variable "logs_kms_key_arn" {
   description = "KMS key that encrypts the flow log group."
   type        = string
 }
+
+variable "permissions_boundary_arn" {
+  description = "Permissions boundary attached to every IAM role this module creates (see infra/bootstrap)."
+  type        = string
+  default     = null
+}
