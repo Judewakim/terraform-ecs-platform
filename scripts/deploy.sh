@@ -19,6 +19,8 @@ terraform apply -input=false -auto-approve -target=module.ecr -var "image_tag=$T
 
 REPO="$(terraform output -raw ecr_repository_url)"
 aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "${REPO%%/*}"
+# Base image registry: logged-in pulls avoid the anonymous per-IP rate limit.
+aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws
 
 if aws ecr describe-images --repository-name shortlink --image-ids imageTag="$TAG" >/dev/null 2>&1; then
   echo "Image $TAG already in ECR; skipping build."
