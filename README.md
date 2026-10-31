@@ -119,6 +119,7 @@ See [docs/decisions.md](docs/decisions.md).
 - [docs/decisions.md](docs/decisions.md) — why ECS over EKS, one NAT, the security-group layout, and what changes for production
 - [docs/runbook.md](docs/runbook.md) — what to do when each alarm fires
 - [docs/postmortem-template.md](docs/postmortem-template.md)
+- [docs/postmortems/2026-10-31-db-access-drill.md](docs/postmortems/2026-10-31-db-access-drill.md) — the incident drill, with timeline and action items
 
 ## Layout
 
