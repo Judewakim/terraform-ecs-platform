@@ -10,6 +10,10 @@ The app is a small URL-shortener API. The infrastructure is the point.
 
 ## Architecture
 
+![Architecture diagram](docs/architecture.png)
+
+The same flow as a diagram you can edit:
+
 ```mermaid
 flowchart LR
     user([Internet]) -->|80 / 443| alb
